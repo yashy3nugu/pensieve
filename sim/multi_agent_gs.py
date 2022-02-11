@@ -16,7 +16,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 S_INFO = 6
 S_LEN = 8  # take how many frames in the past
 A_DIM = 6
-ACTOR_LR_RATE = 0.0001
+ACTOR_LR_RATE = 0.001
 CRITIC_LR_RATE = 0.001
 NUM_AGENTS = 16
 TRAIN_SEQ_LEN = 100  # take as a train batch
@@ -31,7 +31,7 @@ SMOOTH_PENALTY = 1
 DEFAULT_QUALITY = 1  # default video quality without agent
 RANDOM_SEED = 42
 RAND_RANGE = 1000
-SUMMARY_DIR = './results'
+SUMMARY_DIR = './results_gs'
 LOG_FILE = './results_gs/log'
 TEST_LOG_FOLDER = './test_results_gs/'
 TRAIN_TRACES = './cooked_traces/'
@@ -289,6 +289,11 @@ class Worker():
 
 
 def main():
+
+    os.system('rm -r ' + SUMMARY_DIR)
+    os.system('mkdir ' + SUMMARY_DIR)
+    os.system('rm -r ' + TEST_LOG_FOLDER)
+    os.system('mkdir ' + TEST_LOG_FOLDER)
 
     global_actors = []
     global_critics = []

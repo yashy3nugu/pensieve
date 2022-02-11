@@ -69,7 +69,8 @@ class ActorNetwork(object):
             self.obj = tf.reduce_sum(tf.multiply(tf.log(tf.reduce_sum(tf.multiply(self.out, self.acts), reduction_indices=1, keep_dims=True)), -
                                      self.act_grad_weights)) + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.out, tf.log(self.out + ENTROPY_EPS)))
 
-            self.actor_gradients = tf.gradients(self.obj, self.network_params)
+            self.actor_gradients = modify_gradients(
+                tf.gradients(self.obj, self.network_params))
 
             self.optimize = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.actor_gradients, self.network_params))
@@ -197,8 +198,8 @@ class CriticNetwork(object):
 
             self.loss = tflearn.mean_square(self.td_target, self.out)
 
-            self.critic_gradients = tf.gradients(
-                self.loss, self.network_params)
+            self.critic_gradients = modify_gradients(tf.gradients(
+                self.loss, self.network_params))
 
             self.optimize = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.critic_gradients, self.network_params))
