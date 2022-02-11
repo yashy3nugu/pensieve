@@ -31,7 +31,7 @@ TEST_TRACES = './cooked_test_traces/'
 # GLOBAL_ASSIGNMENT = sys.argv[2]
 
 
-def run_tests(sess, actor, nn_model, global_assignment):
+def run_tests(sess, actor, global_assignment):
 
     np.random.seed(RANDOM_SEED)
 

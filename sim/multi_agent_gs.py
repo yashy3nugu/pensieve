@@ -1,11 +1,14 @@
+import threading
+from time import sleep
 import load_trace
-import a3c
+from a3c_gs import ActorNetwork, CriticNetwork, compute_gradients
 import env
 import tensorflow as tf
 import os
 import logging
 import numpy as np
 import multiprocessing as mp
+from rl_test_gs import run_tests
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
 
@@ -29,360 +32,298 @@ DEFAULT_QUALITY = 1  # default video quality without agent
 RANDOM_SEED = 42
 RAND_RANGE = 1000
 SUMMARY_DIR = './results'
-LOG_FILE = './results/log'
-TEST_LOG_FOLDER = './test_results/'
+LOG_FILE = './results_gs/log'
+TEST_LOG_FOLDER = './test_results_gs/'
 TRAIN_TRACES = './cooked_traces/'
 # NN_MODEL = './results/pretrain_linear_reward.ckpt'
 NN_MODEL = None
+GLOBAL_WORKERS = 3
+NUM_WORKERS = 2
+EPOCHS = 100000
 
 
-def testing(epoch, nn_model, log_file):
-    # clean up the test results folder
-    os.system('rm -r ' + TEST_LOG_FOLDER)
-    os.system('mkdir ' + TEST_LOG_FOLDER)
+class Worker():
+    def __init__(self, global_assignment, name, all_cooked_time, all_cooked_bw, saver_thread):
+        self.name = str(name)+"_worker_" + str(global_assignment)
+        self.global_assignment = self.name[-1]  # get global assignment index
+        self.local_actor = ActorNetwork(state_dim=[
+                                        S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=GLOBAL_WORKERS, scope="actor_" + self.name)
+        self.local_critic = CriticNetwork(state_dim=[
+                                          S_INFO, S_LEN], learning_rate=ACTOR_LR_RATE, global_workers=GLOBAL_WORKERS, scope="critic_" + self.name)
+        self.env = env.Environment(
+            all_cooked_time=all_cooked_time, all_cooked_bw=all_cooked_bw)
+        self.saver_thread = saver_thread
 
-    # run test script
-    os.system('python rl_test.py ' + nn_model)
+    def train(self, sess, actor_gradient, critic_gradient):
+        self.local_actor.apply_gradients(sess, actor_gradient)
+        self.local_critic.apply_gradients(sess, critic_gradient)
 
-    # append test performance to the log
-    rewards = []
-    test_log_files = os.listdir(TEST_LOG_FOLDER)
-    for test_log_file in test_log_files:
-        reward = []
-        with open(TEST_LOG_FOLDER + test_log_file, 'rb') as f:
-            for line in f:
-                parse = line.split()
-                try:
-                    reward.append(float(parse[-1]))
-                except IndexError:
-                    break
-        rewards.append(np.sum(reward[1:]))
+        self.other_ids = list(range(GLOBAL_WORKERS))
+        del self.other_ids[int(self.global_assignment)]
 
-    rewards = np.array(rewards)
+        # self.block_global = [tf.assign(self.block_vars[i],[False]) for i in range(global_workers)] #handle to activate lock
+        # self.unblock_global = [tf.assign(self.block_vars[i],[True]) for i in range(global_workers)] #handle to deactivate lock
 
-    rewards_min = np.min(rewards)
-    rewards_5per = np.percentile(rewards, 5)
-    rewards_mean = np.mean(rewards)
-    rewards_median = np.percentile(rewards, 50)
-    rewards_95per = np.percentile(rewards, 95)
-    rewards_max = np.max(rewards)
+        self.actor_block_stats = self.local_actor.get_block_vars(sess)
+        # self.critic_block_stats = self.local_critic.get_block_vars(sess)
+        self.valid_actor_updates = list(np.array(self.actor_block_stats))
+        # self.valid_critic_updates = list(np.array(self.critic_block_stats))
 
-    log_file.write(str(epoch) + '\t' +
-                   str(rewards_min) + '\t' +
-                   str(rewards_5per) + '\t' +
-                   str(rewards_mean) + '\t' +
-                   str(rewards_median) + '\t' +
-                   str(rewards_95per) + '\t' +
-                   str(rewards_max) + '\n')
-    log_file.flush()
+        # loop until all locks are de-activated
+        while not all([v == True for v in self.valid_actor_updates]):
+            self.actor_block_stats = self.local_actor.get_block_vars(sess)
+            self.valid_actor_updates = list(np.array(self.actor_block_stats))
 
+        feed_dict_actor = {k: v for (k, v) in zip(
+            self.local_actor.feed_gradients, actor_gradient)}
+        feed_dict_critic = {k: v for (k, v) in zip(
+            self.local_critic.feed_gradients, critic_gradient)}
 
-def central_agent(net_params_queues, exp_queues):
+        for i in range(GLOBAL_WORKERS):
+            # activate all locks
+            sess.run(self.local_actor.block_global[int(i)])
+        for i in range(len(self.other_ids)):
+            sess.run(self.local_actor.apply_other_grads[int(
+                i)], feed_dict=feed_dict_actor)
+            sess.run(self.local_critic.apply_other_grads[int(
+                i)], feed_dict=feed_dict_critic)
+        for i in range(GLOBAL_WORKERS):
+            # de-activate all locks
+            sess.run(self.local_actor.unblock_global[int(i)])
 
-    assert len(net_params_queues) == NUM_AGENTS
-    assert len(exp_queues) == NUM_AGENTS
+        #
+        # for i in range(len(self.other_ids)): sess.run(self.local_AC.apply_other_grads[int(i)], feed_dict=feed_dict) #apply grads to all other global parameters
+        # for i in range(GLOBAL_WORKERS): sess.run(self.local_critic.unblock_global[int(i)]) #de-activate all locks
 
-    logging.basicConfig(filename=LOG_FILE + '_central',
-                        filemode='w',
-                        level=logging.INFO)
+    def work(self, sess, coord, saver):
 
-    with tf.Session() as sess, open(LOG_FILE + '_test', 'wb') as test_log_file:
+        test_log_file_path = LOG_FILE + '_test_' + str(self.global_assignment)
 
-        actor = a3c.ActorNetwork(sess,
-                                 state_dim=[S_INFO, S_LEN], action_dim=A_DIM,
-                                 learning_rate=ACTOR_LR_RATE)
-        critic = a3c.CriticNetwork(sess,
-                                   state_dim=[S_INFO, S_LEN],
-                                   learning_rate=CRITIC_LR_RATE)
+        with sess.as_default(), sess.graph.as_default(), open(LOG_FILE + self.name, 'wb') as log_file, open(test_log_file_path, 'wb') as test_log_file:
 
-        summary_ops, summary_vars = a3c.build_summaries()
+            self.local_actor.transfer_global_params(sess)
+            self.local_critic.transfer_global_params(sess)
 
-        sess.run(tf.global_variables_initializer())
-        writer = tf.summary.FileWriter(
-            SUMMARY_DIR, sess.graph)  # training monitor
-        saver = tf.train.Saver()  # save neural net parameters
+            epoch = 0
+            last_bit_rate = DEFAULT_QUALITY
+            bit_rate = DEFAULT_QUALITY
 
-        # restore neural net parameters
-        nn_model = NN_MODEL
-        if nn_model is not None:  # nn_model is the path to file
-            saver.restore(sess, nn_model)
-            print("Model restored.")
+            action_vec = np.zeros(A_DIM)
+            action_vec[bit_rate] = 1
 
-        epoch = 0
+            s_batch = [np.zeros((S_INFO, S_LEN))]
+            a_batch = [action_vec]
+            r_batch = []
+            entropy_record = []
 
-        # assemble experiences from agents, compute the gradients
-        while True:
-            # synchronize the network parameters of work agent
-            actor_net_params = actor.get_network_params()
-            critic_net_params = critic.get_network_params()
-            for i in xrange(NUM_AGENTS):
-                net_params_queues[i].put([actor_net_params, critic_net_params])
-                # Note: this is synchronous version of the parallel training,
-                # which is easier to understand and probe. The framework can be
-                # fairly easily modified to support asynchronous training.
-                # Some practices of asynchronous training (lock-free SGD at
-                # its core) are nicely explained in the following two papers:
-                # https://arxiv.org/abs/1602.01783
-                # https://arxiv.org/abs/1106.5730
+            time_stamp = 0
+            while epoch < EPOCHS:  # experience video streaming forever
 
-            # record average reward and td loss change
-            # in the experiences from the agents
-            total_batch_len = 0.0
-            total_reward = 0.0
-            total_td_loss = 0.0
-            total_entropy = 0.0
-            total_agents = 0.0
+                # the action is from the last decision
+                # this is to make the framework similar to the real
+                delay, sleep_time, buffer_size, rebuf, \
+                    video_chunk_size, next_video_chunk_sizes, \
+                    end_of_video, video_chunk_remain = \
+                    self.env.get_video_chunk(bit_rate)
 
-            # assemble experiences from the agents
-            actor_gradient_batch = []
-            critic_gradient_batch = []
+                time_stamp += delay  # in ms
+                time_stamp += sleep_time  # in ms
 
-            for i in xrange(NUM_AGENTS):
-                s_batch, a_batch, r_batch, terminal, info = exp_queues[i].get()
+                # -- linear reward --
+                # reward is video quality - rebuffer penalty - smoothness
+                reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
+                    - REBUF_PENALTY * rebuf \
+                    - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
+                                              VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
 
-                actor_gradient, critic_gradient, td_batch = \
-                    a3c.compute_gradients(
-                        s_batch=np.stack(s_batch, axis=0),
-                        a_batch=np.vstack(a_batch),
-                        r_batch=np.vstack(r_batch),
-                        terminal=terminal, actor=actor, critic=critic)
+                # -- log scale reward --
+                # log_bit_rate = np.log(VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                # log_last_bit_rate = np.log(VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
 
-                actor_gradient_batch.append(actor_gradient)
-                critic_gradient_batch.append(critic_gradient)
+                # reward = log_bit_rate \
+                #          - REBUF_PENALTY * rebuf \
+                #          - SMOOTH_PENALTY * np.abs(log_bit_rate - log_last_bit_rate)
 
-                total_reward += np.sum(r_batch)
-                total_td_loss += np.sum(td_batch)
-                total_batch_len += len(r_batch)
-                total_agents += 1.0
-                total_entropy += np.sum(info['entropy'])
+                # -- HD reward --
+                # reward = HD_REWARD[bit_rate] \
+                #          - REBUF_PENALTY * rebuf \
+                #          - SMOOTH_PENALTY * np.abs(HD_REWARD[bit_rate] - HD_REWARD[last_bit_rate])
 
-            # compute aggregated gradient
-            assert NUM_AGENTS == len(actor_gradient_batch)
-            assert len(actor_gradient_batch) == len(critic_gradient_batch)
-            # assembled_actor_gradient = actor_gradient_batch[0]
-            # assembled_critic_gradient = critic_gradient_batch[0]
-            # for i in xrange(len(actor_gradient_batch) - 1):
-            #     for j in xrange(len(assembled_actor_gradient)):
-            #             assembled_actor_gradient[j] += actor_gradient_batch[i][j]
-            #             assembled_critic_gradient[j] += critic_gradient_batch[i][j]
-            # actor.apply_gradients(assembled_actor_gradient)
-            # critic.apply_gradients(assembled_critic_gradient)
-            for i in xrange(len(actor_gradient_batch)):
-                actor.apply_gradients(actor_gradient_batch[i])
-                critic.apply_gradients(critic_gradient_batch[i])
+                r_batch.append(reward)
 
-            # log training information
-            epoch += 1
-            avg_reward = total_reward / total_agents
-            avg_td_loss = total_td_loss / total_batch_len
-            avg_entropy = total_entropy / total_batch_len
+                last_bit_rate = bit_rate
 
-            logging.info('Epoch: ' + str(epoch) +
-                         ' TD_loss: ' + str(avg_td_loss) +
-                         ' Avg_reward: ' + str(avg_reward) +
-                         ' Avg_entropy: ' + str(avg_entropy))
+                # retrieve previous state
+                if len(s_batch) == 0:
+                    state = [np.zeros((S_INFO, S_LEN))]
+                else:
+                    state = np.array(s_batch[-1], copy=True)
 
-            summary_str = sess.run(summary_ops, feed_dict={
-                summary_vars[0]: avg_td_loss,
-                summary_vars[1]: avg_reward,
-                summary_vars[2]: avg_entropy
-            })
+                # dequeue history record
+                state = np.roll(state, -1, axis=1)
 
-            writer.add_summary(summary_str, epoch)
-            writer.flush()
+                # this should be S_INFO number of terms
+                state[0, -1] = VIDEO_BIT_RATE[bit_rate] / \
+                    float(np.max(VIDEO_BIT_RATE))  # last quality
+                state[1, -1] = buffer_size / BUFFER_NORM_FACTOR  # 10 sec
+                state[2, -1] = float(video_chunk_size) / \
+                    float(delay) / M_IN_K  # kilo byte / ms
+                state[3, -1] = float(delay) / M_IN_K / \
+                    BUFFER_NORM_FACTOR  # 10 sec
+                state[4, :A_DIM] = np.array(
+                    next_video_chunk_sizes) / M_IN_K / M_IN_K  # mega byte
+                state[5, -1] = np.minimum(video_chunk_remain,
+                                          CHUNK_TIL_VIDEO_END_CAP) / float(CHUNK_TIL_VIDEO_END_CAP)
 
-            if epoch % MODEL_SAVE_INTERVAL == 0:
-                # Save the neural net parameters to disk.
-                save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
-                                       str(epoch) + ".ckpt")
-                logging.info("Model saved in file: " + save_path)
-                testing(epoch,
-                        SUMMARY_DIR + "/nn_model_ep_" + str(epoch) + ".ckpt",
-                        test_log_file)
+                # compute action probability vector
+                action_prob = self.local_actor.predict(
+                    sess, np.reshape(state, (1, S_INFO, S_LEN)))
+                action_cumsum = np.cumsum(action_prob)
+                bit_rate = (action_cumsum > np.random.randint(
+                    1, RAND_RANGE) / float(RAND_RANGE)).argmax()
+                # Note: we need to discretize the probability into 1/RAND_RANGE steps,
+                # because there is an intrinsic discrepancy in passing single state and batch states
 
+                # entropy_record.append(a3c.compute_entropy(action_prob[0]))
 
-def agent(agent_id, all_cooked_time, all_cooked_bw, net_params_queue, exp_queue):
+                # log time_stamp, bit_rate, buffer_size, reward
+                log_file.write(str(time_stamp) + '\t' +
+                               str(VIDEO_BIT_RATE[bit_rate]) + '\t' +
+                               str(buffer_size) + '\t' +
+                               str(rebuf) + '\t' +
+                               str(video_chunk_size) + '\t' +
+                               str(delay) + '\t' +
+                               str(reward) + '\n')
+                log_file.flush()
 
-    net_env = env.Environment(all_cooked_time=all_cooked_time,
-                              all_cooked_bw=all_cooked_bw,
-                              random_seed=agent_id)
+                epoch += 1
 
-    with tf.Session() as sess, open(LOG_FILE + '_agent_' + str(agent_id), 'wb') as log_file:
-        actor = a3c.ActorNetwork(sess,
-                                 state_dim=[S_INFO, S_LEN], action_dim=A_DIM,
-                                 learning_rate=ACTOR_LR_RATE)
-        critic = a3c.CriticNetwork(sess,
-                                   state_dim=[S_INFO, S_LEN],
-                                   learning_rate=CRITIC_LR_RATE)
+                # report experience to the coordinator
+                if len(r_batch) >= TRAIN_SEQ_LEN or end_of_video:
 
-        # initial synchronization of the network parameters from the coordinator
-        actor_net_params, critic_net_params = net_params_queue.get()
-        actor.set_network_params(actor_net_params)
-        critic.set_network_params(critic_net_params)
+                    actor_gradient, critic_gradient, td_batch = \
+                        compute_gradients(
+                            sess=sess,
+                            s_batch=np.stack(s_batch, axis=0),
+                            a_batch=np.vstack(a_batch),
+                            r_batch=np.vstack(r_batch),
+                            terminal=end_of_video, actor=self.local_actor, critic=self.local_critic)
 
-        last_bit_rate = DEFAULT_QUALITY
-        bit_rate = DEFAULT_QUALITY
+                    self.train(sess, actor_gradient, critic_gradient)
 
-        action_vec = np.zeros(A_DIM)
-        action_vec[bit_rate] = 1
+                    del s_batch[:]
+                    del a_batch[:]
+                    del r_batch[:]
+                    del entropy_record[:]
 
-        s_batch = [np.zeros((S_INFO, S_LEN))]
-        a_batch = [action_vec]
-        r_batch = []
-        entropy_record = []
+                    # so that in the log we know where video ends
+                    log_file.write('\n')
 
-        time_stamp = 0
-        while True:  # experience video streaming forever
+                # store the state and action into batches
+                if end_of_video:
+                    last_bit_rate = DEFAULT_QUALITY
+                    bit_rate = DEFAULT_QUALITY  # use the default action here
 
-            # the action is from the last decision
-            # this is to make the framework similar to the real
-            delay, sleep_time, buffer_size, rebuf, \
-                video_chunk_size, next_video_chunk_sizes, \
-                end_of_video, video_chunk_remain = \
-                net_env.get_video_chunk(bit_rate)
+                    action_vec = np.zeros(A_DIM)
+                    action_vec[bit_rate] = 1
 
-            time_stamp += delay  # in ms
-            time_stamp += sleep_time  # in ms
+                    s_batch.append(np.zeros((S_INFO, S_LEN)))
+                    a_batch.append(action_vec)
 
-            # -- linear reward --
-            # reward is video quality - rebuffer penalty - smoothness
-            reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
-                - REBUF_PENALTY * rebuf \
-                - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
-                                          VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
+                else:
+                    s_batch.append(state)
 
-            # -- log scale reward --
-            # log_bit_rate = np.log(VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
-            # log_last_bit_rate = np.log(VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                    action_vec = np.zeros(A_DIM)
+                    action_vec[bit_rate] = 1
+                    a_batch.append(action_vec)
 
-            # reward = log_bit_rate \
-            #          - REBUF_PENALTY * rebuf \
-            #          - SMOOTH_PENALTY * np.abs(log_bit_rate - log_last_bit_rate)
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
+                    # Save the neural net parameters to disk.
+                    # save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
+                    #                     str(epoch) + ".ckpt")
+                    self.local_actor.update_local_params(sess)
 
-            # -- HD reward --
-            # reward = HD_REWARD[bit_rate] \
-            #          - REBUF_PENALTY * rebuf \
-            #          - SMOOTH_PENALTY * np.abs(HD_REWARD[bit_rate] - HD_REWARD[last_bit_rate])
+                    self.testing(sess, epoch, test_log_file)
 
-            r_batch.append(reward)
+    def testing(self, sess, epoch, log_file):
+        # clean up the test results folder
+        thread_test_folder = TEST_LOG_FOLDER + self.global_assignment + '/'
+        os.system('rm -r ' + thread_test_folder)
+        os.system('mkdir ' + thread_test_folder)
 
-            last_bit_rate = bit_rate
+        # run test script
+        # os.system('python rl_test.py ' + nn_model)
+        run_tests(sess, self.local_actor, self.global_assignment)
 
-            # retrieve previous state
-            if len(s_batch) == 0:
-                state = [np.zeros((S_INFO, S_LEN))]
-            else:
-                state = np.array(s_batch[-1], copy=True)
+        # append test performance to the log
+        rewards = []
+        test_log_files = os.listdir(thread_test_folder)
+        for test_log_file in test_log_files:
+            reward = []
+            with open(thread_test_folder + test_log_file, 'rb') as f:
+                for line in f:
+                    parse = line.split()
+                    try:
+                        reward.append(float(parse[-1]))
+                    except IndexError:
+                        break
+            rewards.append(np.sum(reward[1:]))
 
-            # dequeue history record
-            state = np.roll(state, -1, axis=1)
+        rewards = np.array(rewards)
 
-            # this should be S_INFO number of terms
-            state[0, -1] = VIDEO_BIT_RATE[bit_rate] / \
-                float(np.max(VIDEO_BIT_RATE))  # last quality
-            state[1, -1] = buffer_size / BUFFER_NORM_FACTOR  # 10 sec
-            state[2, -1] = float(video_chunk_size) / \
-                float(delay) / M_IN_K  # kilo byte / ms
-            state[3, -1] = float(delay) / M_IN_K / BUFFER_NORM_FACTOR  # 10 sec
-            state[4, :A_DIM] = np.array(
-                next_video_chunk_sizes) / M_IN_K / M_IN_K  # mega byte
-            state[5, -1] = np.minimum(video_chunk_remain,
-                                      CHUNK_TIL_VIDEO_END_CAP) / float(CHUNK_TIL_VIDEO_END_CAP)
+        rewards_min = np.min(rewards)
+        rewards_5per = np.percentile(rewards, 5)
+        rewards_mean = np.mean(rewards)
+        rewards_median = np.percentile(rewards, 50)
+        rewards_95per = np.percentile(rewards, 95)
+        rewards_max = np.max(rewards)
 
-            # compute action probability vector
-            action_prob = actor.predict(np.reshape(state, (1, S_INFO, S_LEN)))
-            action_cumsum = np.cumsum(action_prob)
-            bit_rate = (action_cumsum > np.random.randint(
-                1, RAND_RANGE) / float(RAND_RANGE)).argmax()
-            # Note: we need to discretize the probability into 1/RAND_RANGE steps,
-            # because there is an intrinsic discrepancy in passing single state and batch states
-
-            entropy_record.append(a3c.compute_entropy(action_prob[0]))
-
-            # log time_stamp, bit_rate, buffer_size, reward
-            log_file.write(str(time_stamp) + '\t' +
-                           str(VIDEO_BIT_RATE[bit_rate]) + '\t' +
-                           str(buffer_size) + '\t' +
-                           str(rebuf) + '\t' +
-                           str(video_chunk_size) + '\t' +
-                           str(delay) + '\t' +
-                           str(reward) + '\n')
-            log_file.flush()
-
-            # report experience to the coordinator
-            if len(r_batch) >= TRAIN_SEQ_LEN or end_of_video:
-                exp_queue.put([s_batch[1:],  # ignore the first chuck
-                               a_batch[1:],  # since we don't have the
-                               r_batch[1:],  # control over it
-                               end_of_video,
-                               {'entropy': entropy_record}])
-
-                # synchronize the network parameters from the coordinator
-                actor_net_params, critic_net_params = net_params_queue.get()
-                actor.set_network_params(actor_net_params)
-                critic.set_network_params(critic_net_params)
-
-                del s_batch[:]
-                del a_batch[:]
-                del r_batch[:]
-                del entropy_record[:]
-
-                # so that in the log we know where video ends
-                log_file.write('\n')
-
-            # store the state and action into batches
-            if end_of_video:
-                last_bit_rate = DEFAULT_QUALITY
-                bit_rate = DEFAULT_QUALITY  # use the default action here
-
-                action_vec = np.zeros(A_DIM)
-                action_vec[bit_rate] = 1
-
-                s_batch.append(np.zeros((S_INFO, S_LEN)))
-                a_batch.append(action_vec)
-
-            else:
-                s_batch.append(state)
-
-                action_vec = np.zeros(A_DIM)
-                action_vec[bit_rate] = 1
-                a_batch.append(action_vec)
+        log_file.write(str(epoch) + '\t' +
+                       str(rewards_min) + '\t' +
+                       str(rewards_5per) + '\t' +
+                       str(rewards_mean) + '\t' +
+                       str(rewards_median) + '\t' +
+                       str(rewards_95per) + '\t' +
+                       str(rewards_max) + '\n')
+        log_file.flush()
 
 
 def main():
 
-    np.random.seed(RANDOM_SEED)
-    assert len(VIDEO_BIT_RATE) == A_DIM
+    global_actors = []
+    global_critics = []
 
-    # create result directory
-    if not os.path.exists(SUMMARY_DIR):
-        os.makedirs(SUMMARY_DIR)
-
-    # inter-process communication queues
-    net_params_queues = []
-    exp_queues = []
-    for i in xrange(NUM_AGENTS):
-        net_params_queues.append(mp.Queue(1))
-        exp_queues.append(mp.Queue(1))
-
-    # create a coordinator and multiple agent processes
-    # (note: threading is not desirable due to python GIL)
-    coordinator = mp.Process(target=central_agent,
-                             args=(net_params_queues, exp_queues))
-    coordinator.start()
+    workers = []
 
     all_cooked_time, all_cooked_bw, _ = load_trace.load_trace(TRAIN_TRACES)
-    agents = []
-    for i in xrange(NUM_AGENTS):
-        agents.append(mp.Process(target=agent,
-                                 args=(i, all_cooked_time, all_cooked_bw,
-                                       net_params_queues[i],
-                                       exp_queues[i])))
-    for i in xrange(NUM_AGENTS):
-        agents[i].start()
 
-    # wait unit training is done
-    coordinator.join()
+    for i in range(GLOBAL_WORKERS):
+        agent_name = 'global_'+str(i)
+        global_actors.append(ActorNetwork(state_dim=[
+                             S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=None, scope='actor_'+agent_name))
+        global_critics.append(CriticNetwork(state_dim=[
+                              S_INFO, S_LEN], learning_rate=CRITIC_LR_RATE, global_workers=GLOBAL_WORKERS, scope='critic_'+agent_name))
+
+    for j in range(GLOBAL_WORKERS):
+        for i in range(NUM_WORKERS):
+            workers.append(Worker(global_assignment=j, name=i, all_cooked_time=all_cooked_time,
+                           all_cooked_bw=all_cooked_bw, saver_thread=i == 0))  # create workers for each global parameter set
+
+    saver = tf.train.Saver(max_to_keep=5)
+
+    with tf.Session() as sess:
+        coord = tf.train.Coordinator()
+        sess.run(tf.global_variables_initializer())
+
+        worker_threads = []
+        for worker in workers:
+            def worker_work(): return worker.work(sess, coord, saver)
+            # threading operator to run multiple workers
+            t = threading.Thread(target=(worker_work))
+            t.start()
+            sleep(0.5)
+            worker_threads.append(t)
+        coord.join(worker_threads)
 
 
 if __name__ == '__main__':

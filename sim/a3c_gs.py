@@ -55,29 +55,49 @@ class ActorNetwork(object):
         if 'global' not in scope:
             self.update_local_ops = update_target_graph(
                 'actor_global_' + str(scope[-1]), scope)
+
             self.transfer_global = [update_target_graph(
                 'actor_global_0', 'actor_global_' + str(i)) for i in range(global_workers)]
+
             self.network_params = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
+
             self.acts = tf.placeholder(tf.float32, [None, self.a_dim])
+
             self.act_grad_weights = tf.placeholder(tf.float32, [None, 1])
+
             self.obj = tf.reduce_sum(tf.multiply(tf.log(tf.reduce_sum(tf.multiply(self.out, self.acts), reduction_indices=1, keep_dims=True)), -
                                      self.act_grad_weights)) + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.out, tf.log(self.out + ENTROPY_EPS)))
+
             self.actor_gradients = tf.gradients(self.obj, self.network_params)
+
             self.optimize = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.actor_gradients, self.network_params))
+
             self.own_global_vars = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'actor_global_' + str(scope[-1]))
+
             self.apply_own_grads = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.actor_gradients, self.own_global_vars))
+
             self.others_list = [int(x) for x in range(
                 global_workers) if x != int(str(scope[-1]))]
+
             other_global_vars = [tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'actor_global_' + str(i)) for i in self.others_list]
+
             self.feed_gradients = [tf.reshape(tf.placeholder(
                 shape=[None], dtype=tf.float32), grad.shape) for grad in self.actor_gradients]
+
             self.apply_other_grads = [self.trainer(self.lr_rate).apply_gradients(zip(
                 self.feed_gradients, other_global_vars[i])) for i in range(len(self.others_list))]
+
+            self.block_vars = [x for x in tf.get_collection(
+                tf.GraphKeys.GLOBAL_VARIABLES) if 'blocker_actor' in x.name]  # handle to activate lock
+            self.block_global = [tf.assign(self.block_vars[i], [False]) for i in range(
+                global_workers)]  # handle to activate lock
+            self.unblock_global = [tf.assign(self.block_vars[i], [True]) for i in range(
+                global_workers)]  # handle to deactivate lock
         return
 
     def create_actor_network(self, scope):
@@ -157,33 +177,46 @@ class CriticNetwork(object):
         self.trainer = tf.train.AdamOptimizer
         self.scope = scope
         self.inputs, self.out = self.create_critic_network(scope)
-        if 'global' in scope:
-            self.block = tf.Variable(
-                initial_value=[True], dtype=tf.bool, trainable=False, name='blocker_critic')
+        # if 'global' in scope:
+        #     self.block = tf.Variable(
+        #         initial_value=[True], dtype=tf.bool, trainable=False, name='blocker_critic')
         if 'global' not in scope:
+
             self.update_local_ops = update_target_graph(
                 'critic_global_' + str(scope[-1]), scope)
+
             self.transfer_global = [update_target_graph(
                 'critic_global_0', 'critic_global_' + str(i)) for i in range(global_workers)]
+
             self.network_params = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
+
             self.td_target = tf.placeholder(tf.float32, [None, 1])
+
             self.td = tf.subtract(self.td_target, self.out)
+
             self.loss = tflearn.mean_square(self.td_target, self.out)
+
             self.critic_gradients = tf.gradients(
                 self.loss, self.network_params)
+
             self.optimize = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.critic_gradients, self.network_params))
+
             self.own_global_vars = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'critic_global_' + str(scope[-1]))
             self.apply_own_grads = self.trainer(self.lr_rate).apply_gradients(
                 zip(self.critic_gradients, self.own_global_vars))
+
             self.others_list = [int(x) for x in range(
                 global_workers) if x != int(str(scope[-1]))]
+
             other_global_vars = [tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'critic_global_' + str(i)) for i in self.others_list]
+
             self.feed_gradients = [tf.reshape(tf.placeholder(
                 shape=[None], dtype=tf.float32), grad.shape) for grad in self.critic_gradients]
+
             self.apply_other_grads = [self.trainer(self.lr_rate).apply_gradients(zip(
                 self.feed_gradients, other_global_vars[i])) for i in range(len(self.others_list))]
         return
@@ -247,18 +280,18 @@ class CriticNetwork(object):
     def get_block_vars(self, sess):
         return sess.run([x for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if 'blocker_critic' in x.name])
 
-    def update_global_params(self, sess, grads, other_ids):
-        num_params = len(other_ids)
-        feed_dict = {k: v for k, v in zip(self.feed_gradients, grads)}
-        for i in range(num_params + 1):
-            sess.run(self.block_global[int(i)])
+    # def update_global_params(self, sess, grads, other_ids):
+    #     num_params = len(other_ids)
+    #     feed_dict = {k: v for k, v in zip(self.feed_gradients, grads)}
+    #     for i in range(num_params + 1):
+    #         sess.run(self.block_global[int(i)])
 
-        for i in range(num_params):
-            sess.run(
-                self.local_AC.apply_other_grads[int(i)], feed_dict=feed_dict)
+    #     for i in range(num_params):
+    #         sess.run(
+    #             self.local_AC.apply_other_grads[int(i)], feed_dict=feed_dict)
 
-        for i in range(num_params + 1):
-            sess.run(self.unblock_global[int(i)])
+    #     for i in range(num_params + 1):
+    #         sess.run(self.unblock_global[int(i)])
 
     def transfer_global_params(self, sess):
         sess.run(self.transfer_global)
@@ -290,7 +323,7 @@ def compute_gradients(sess, s_batch, a_batch, r_batch, terminal, actor, critic):
 
     ba_size = s_batch.shape[0]
 
-    v_batch = critic.predict(s_batch)
+    v_batch = critic.predict(sess, s_batch)
 
     R_batch = np.zeros(r_batch.shape)
 
