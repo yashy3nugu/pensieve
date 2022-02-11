@@ -21,6 +21,11 @@ os.system("sudo python setup.py install" )
 os.system("sudo sh -c \"echo 'DBUS_SESSION_BUS_ADDRESS=/dev/null' > /etc/init.d/selenium\"")
 
 # py virtual display
+# update, try this if pyvirtualdisplay gives:
+# uninstall the latest version of pyvirtualdisplay
+# sudo apt-get install xvfb xserver-xephyr vnc4server
+# pip uninstall pyvirtualdisplay
+# pip install easyprocess==0.2 pyvirtualdisplay==0.2 
 os.chdir( start_dir )
 os.system("sudo pip install pyvirtualdisplay")
 os.system("wget 'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb' ")
@@ -28,6 +33,8 @@ os.system("sudo dpkg -i google-chrome-stable_current_amd64.deb")
 os.system("sudo apt-get -f -y install")
 
 # tensorflow
+# pip uninstall protobuf
+# pip install protobuf=3.17.3
 os.system("sudo apt-get -y install python-pip python-dev")
 os.system("sudo pip install tensorflow")
 

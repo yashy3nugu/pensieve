@@ -218,13 +218,16 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
         os.makedirs(SUMMARY_DIR)
 
     with tf.Session() as sess, open(log_file_path, 'wb') as log_file:
+        log_file.write('started log \n')
 
         actor = a3c.ActorNetwork(sess,
                                  state_dim=[S_INFO, S_LEN], action_dim=A_DIM,
                                  learning_rate=ACTOR_LR_RATE)
+        log_file.write('created actor \n')
         critic = a3c.CriticNetwork(sess,
                                    state_dim=[S_INFO, S_LEN],
                                    learning_rate=CRITIC_LR_RATE)
+        log_file.write('created critic \n')
 
         sess.run(tf.initialize_all_variables())
         saver = tf.train.Saver()  # save neural net parameters
@@ -234,6 +237,7 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
         if nn_model is not None:  # nn_model is the path to file
             saver.restore(sess, nn_model)
             print("Model restored.")
+            log_file.write('restored model \n')
 
         init_action = np.zeros(A_DIM)
         init_action[DEFAULT_QUALITY] = 1
@@ -259,12 +263,18 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
                       'video_chunk_coount': video_chunk_count,
                       's_batch': s_batch, 'a_batch': a_batch, 'r_batch': r_batch}
 
+        log_file.write('making request handler')
         # interface to abr_rl server
         handler_class = make_request_handler(input_dict=input_dict)
-
+        log_file.write('made request handler \n')
         server_address = ('localhost', port)
+        log_file.write('making server class \n')
+        
         httpd = server_class(server_address, handler_class)
+        
+        log_file.write('made server class \n')
         print 'Listening on port ' + str(port)
+        log_file.write('server listening port \n')
         httpd.serve_forever()
 
 

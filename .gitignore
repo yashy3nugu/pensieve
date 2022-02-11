@@ -1,0 +1,12 @@
+selenium-2.39.0.tar.gz
+selenium-2.39.0/
+google-chrome-stable_current_amd64.deb
+*/cooked_traces/
+*/cooked_test_traces/
+*/results
+*/results_gs
+*/test_results
+*/test_results_gs
+video_size_*
+*.pyc
+cooked_traces/

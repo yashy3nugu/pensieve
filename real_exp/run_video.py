@@ -10,6 +10,7 @@ from selenium.common.exceptions import TimeoutException
 from pyvirtualdisplay import Display
 from time import sleep
 
+
 # TO RUN: download https://pypi.python.org/packages/source/s/selenium/selenium-2.39.0.tar.gz
 # run sudo apt-get install python-setuptools
 # run sudo apt-get install xvfb
@@ -34,71 +35,93 @@ exp_id = sys.argv[3]
 # ---------------------------------------------------
 #          |
 #          v
-url = 'localhost/' + 'myindex_' + abr_algo + '.html'
+url = 'localhost:8333/' + 'myindex_' + abr_algo + '.html'
 
 # timeout signal
 signal.signal(signal.SIGALRM, timeout_handler)
 signal.alarm(run_time + 30)
-	
-try:
-	# copy over the chrome user dir
-	default_chrome_user_dir = '../abr_browser_dir/chrome_data_dir'
-	chrome_user_dir = '/tmp/chrome_user_dir_real_exp_' + abr_algo
-	os.system('rm -r ' + chrome_user_dir)
-	os.system('cp -r ' + default_chrome_user_dir + ' ' + chrome_user_dir)
-	
-	# start abr algorithm server
-	if abr_algo == 'RL':
-		command = 'exec /usr/bin/python ../rl_server/rl_server_no_training.py ' + exp_id
-	elif abr_algo == 'fastMPC':
-		command = 'exec /usr/bin/python ../rl_server/mpc_server.py ' + exp_id
-	elif abr_algo == 'robustMPC':
-		command = 'exec /usr/bin/python ../rl_server/robust_mpc_server.py ' + exp_id
-	else:
-		command = 'exec /usr/bin/python ../rl_server/simple_server.py ' + abr_algo + ' ' + exp_id
-	
-	proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-	sleep(2)
-	
-	# to not display the page in browser
-	display = Display(visible=0, size=(800,600))
-	display.start()
-	
-	# initialize chrome driver
-	options=Options()
-	chrome_driver = '../abr_browser_dir/chromedriver'
-	options.add_argument('--user-data-dir=' + chrome_user_dir)
-	options.add_argument('--ignore-certificate-errors')
-	driver=webdriver.Chrome(chrome_driver, chrome_options=options)
-	
-	# run chrome
-	driver.set_page_load_timeout(10)
-	driver.get(url)
-	
-	sleep(run_time)
-	
-	driver.quit()
-	display.stop()
-	
-	# kill abr algorithm server
-	proc.send_signal(signal.SIGINT)
-	# proc.kill()
-	
-	print 'done'
-	
-except Exception as e:
-	try: 
-		display.stop()
-	except:
-		pass
+
+with open('./run_video_log', 'w') as log:	
 	try:
-		driver.quit()
-	except:
-		pass
-	try:
-		proc.send_signal(signal.SIGINT)
-	except:
-		pass
-	
-	print e	
+		
+			log.write('inside \n')
+			# copy over the chrome user dir
+			default_chrome_user_dir = '../abr_browser_dir/chrome_data_dir'
+			chrome_user_dir = '/tmp/chrome_user_dir_real_exp_' + abr_algo
+			os.system('rm -r ' + chrome_user_dir)
+			os.system('cp -r ' + default_chrome_user_dir + ' ' + chrome_user_dir)
+			
+			# start abr algorithm server
+			if abr_algo == 'RL':
+				command = '/usr/bin/python ../rl_server/rl_server_no_training.py ' + exp_id
+			elif abr_algo == 'fastMPC':
+				command = '/usr/bin/python ../rl_server/mpc_server.py ' + exp_id
+			elif abr_algo == 'robustMPC':
+				command = '/usr/bin/python ../rl_server/robust_mpc_server.py ' + exp_id
+			else:
+				command = '/usr/bin/python ../rl_server/simple_server.py ' + abr_algo + ' ' + exp_id
+			
+			log.write('starting command ' + command + '\n')
+			
+			proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+			sleep(2)
+			
+			log.write('starting command ' + command + '\n')
+			# to not display the page in browser
+			display = Display(visible=0, size=(800,600))
+			display.start()
+			
+			# initialize chrome driver
+			options=Options()
+			chrome_driver = '../abr_browser_dir/chromedriver'
+			options.add_argument('--user-data-dir=' + chrome_user_dir)
+			options.add_argument('--ignore-certificate-errors')
+			options.add_argument('--headless')
+			options.add_argument('--no-sandbox')
+			options.add_argument('--disable-dev-shm-usage')
+			options.add_argument('--allow-insecure-localhost')
+			options.add_argument("--proxy-server=localhost:8333")
+			capabilities = options.to_capabilities()
+			capabilities['acceptInsecureCerts'] = True
+			capabilities['platform'] = "linux"
+			
+			driver=webdriver.Chrome(chrome_driver, chrome_options=options)
+			
+			# run chrome
+			driver.set_page_load_timeout(10)
+			
+			log.write(url)
+			driver.get(url)
+			
+			sleep(run_time)
+			
+			driver.quit()
+			display.stop()
+			
+			# kill abr algorithm server
+			proc.send_signal(signal.SIGINT)
+			# proc.kill()
+
+			log.write('printing done \n')
+			
+			print 'done'
+			log.close()
+		
+	except Exception as e:
+		try: 
+			display.stop()
+		except:
+			pass
+		try:
+			driver.quit()
+		except:
+			pass
+		try:
+			proc.send_signal(signal.SIGINT)
+		except:
+			pass
+
+		log.write(e)
+		
+		print e	
 
