@@ -3,7 +3,7 @@ import tensorflow as tf
 import tflearn
 GAMMA = 0.99
 A_DIM = 6
-ENTROPY_WEIGHT = 0.005
+ENTROPY_WEIGHT = 0.3
 ENTROPY_EPS = 1e-06
 S_INFO = 4
 S_LEN = 8
@@ -42,43 +42,55 @@ class ActorNetwork(object):
     of all actions.
     """
 
-    def __init__(self, state_dim, action_dim, learning_rate, global_workers, scope):
+    def __init__(self, state_dim, action_dim, learning_rate, global_workers, scope, entropy_weight):
         self.s_dim = state_dim
         self.a_dim = action_dim
         self.lr_rate = learning_rate
-        self.trainer = tf.train.AdamOptimizer
+        self.entropy_weight = entropy_weight
         self.scope = scope
+
         self.inputs, self.out = self.create_actor_network(scope)
+
+        self.network_params = tf.get_collection(
+            tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
+
         if 'global' in scope:
             self.block = tf.Variable(
                 initial_value=[True], dtype=tf.bool, trainable=False, name='blocker_actor')
         if 'global' not in scope:
+
+            self.lr_placeholder = tf.placeholder(tf.float32)
+            self.entropy_weight_placeholder = tf.placeholder(tf.float32)
+
+            self.trainer = tf.train.RMSPropOptimizer(
+                learning_rate=self.lr_placeholder)
+
             self.update_local_ops = update_target_graph(
                 'actor_global_' + str(scope[-1]), scope)
 
             self.transfer_global = [update_target_graph(
                 'actor_global_0', 'actor_global_' + str(i)) for i in range(global_workers)]
 
-            self.network_params = tf.get_collection(
-                tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
-
             self.acts = tf.placeholder(tf.float32, [None, self.a_dim])
 
             self.act_grad_weights = tf.placeholder(tf.float32, [None, 1])
 
+            # self.obj = tf.reduce_sum(tf.multiply(tf.log(tf.reduce_sum(tf.multiply(self.out, self.acts), reduction_indices=1, keep_dims=True)), -
+            #                          self.act_grad_weights)) + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.out, tf.log(self.out + ENTROPY_EPS)))
+
             self.obj = tf.reduce_sum(tf.multiply(tf.log(tf.reduce_sum(tf.multiply(self.out, self.acts), reduction_indices=1, keep_dims=True)), -
-                                     self.act_grad_weights)) + ENTROPY_WEIGHT * tf.reduce_sum(tf.multiply(self.out, tf.log(self.out + ENTROPY_EPS)))
+                                     self.act_grad_weights)) + self.entropy_weight_placeholder * tf.reduce_sum(tf.multiply(self.out, tf.log(self.out + ENTROPY_EPS)))
 
             self.actor_gradients = modify_gradients(
                 tf.gradients(self.obj, self.network_params))
 
-            self.optimize = self.trainer(self.lr_rate).apply_gradients(
+            self.optimize = self.trainer.apply_gradients(
                 zip(self.actor_gradients, self.network_params))
 
             self.own_global_vars = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'actor_global_' + str(scope[-1]))
 
-            self.apply_own_grads = self.trainer(self.lr_rate).apply_gradients(
+            self.apply_own_grads = self.trainer.apply_gradients(
                 zip(self.actor_gradients, self.own_global_vars))
 
             self.others_list = [int(x) for x in range(
@@ -90,7 +102,7 @@ class ActorNetwork(object):
             self.feed_gradients = [tf.reshape(tf.placeholder(
                 shape=[None], dtype=tf.float32), grad.shape) for grad in self.actor_gradients]
 
-            self.apply_other_grads = [self.trainer(self.lr_rate).apply_gradients(zip(
+            self.apply_other_grads = [self.trainer.apply_gradients(zip(
                 self.feed_gradients, other_global_vars[i])) for i in range(len(self.others_list))]
 
             self.block_vars = [x for x in tf.get_collection(
@@ -126,12 +138,24 @@ class ActorNetwork(object):
                                        split_3_flat,
                                        split_4_flat,
                                        split_5], 'concat')
+
             dense_net_0 = tflearn.fully_connected(
-                merge_net, 128, activation='relu')
+                merge_net, 256, activation='relu')
+            dense_net_0 = tflearn.fully_connected(
+                dense_net_0, 256, activation='relu')
+            dense_net_0 = tflearn.fully_connected(
+                dense_net_0, 256, activation='relu')
+
             out = tflearn.fully_connected(
                 dense_net_0, self.a_dim, activation='softmax')
             return (inputs, out)
         return
+
+    def set_entropy_weight(self, weight):
+        self.entropy_weight = weight
+
+    def set_learning_rate(self, lr):
+        self.lr_rate = lr
 
     def train(self, sess, inputs, acts, act_grad_weights):
         sess.run(self.optimize, feed_dict={self.inputs: inputs,
@@ -144,13 +168,23 @@ class ActorNetwork(object):
     def get_gradients(self, sess, inputs, acts, act_grad_weights):
         return sess.run(self.actor_gradients, feed_dict={self.inputs: inputs,
                                                          self.acts: acts,
-                                                         self.act_grad_weights: act_grad_weights})
+                                                         self.act_grad_weights: act_grad_weights,
+                                                         self.entropy_weight_placeholder: self.entropy_weight})
 
     def apply_gradients(self, sess, actor_gradients):
-        return sess.run([self.optimize, self.apply_own_grads], feed_dict={i: d for i, d in zip(self.actor_gradients, actor_gradients)})
+        feed_dict = {i: d for i, d in zip(
+            self.actor_gradients, actor_gradients)}
+        feed_dict[self.lr_placeholder] = self.lr_rate
+        feed_dict[self.entropy_weight_placeholder] = self.entropy_weight
+
+        return sess.run([self.optimize, self.apply_own_grads], feed_dict=feed_dict)
 
     def get_network_params(self, sess):
         return sess.run(self.network_params)
+
+    def load_network_params(self, sess, params):
+        for i in range(len(params)):
+            self.network_params[i].load(params[i], sess)
 
     def set_network_params(self, sess, input_network_params):
         sess.run(self.set_network_params_op, feed_dict={
@@ -175,13 +209,18 @@ class CriticNetwork(object):
     def __init__(self, state_dim, learning_rate, global_workers, scope):
         self.s_dim = state_dim
         self.lr_rate = learning_rate
-        self.trainer = tf.train.AdamOptimizer
+
         self.scope = scope
         self.inputs, self.out = self.create_critic_network(scope)
         # if 'global' in scope:
         #     self.block = tf.Variable(
         #         initial_value=[True], dtype=tf.bool, trainable=False, name='blocker_critic')
         if 'global' not in scope:
+
+            self.lr_placeholder = tf.placeholder(tf.float32)
+
+            self.trainer = tf.train.RMSPropOptimizer(
+                learning_rate=self.lr_placeholder)
 
             self.update_local_ops = update_target_graph(
                 'critic_global_' + str(scope[-1]), scope)
@@ -201,12 +240,12 @@ class CriticNetwork(object):
             self.critic_gradients = modify_gradients(tf.gradients(
                 self.loss, self.network_params))
 
-            self.optimize = self.trainer(self.lr_rate).apply_gradients(
+            self.optimize = self.trainer.apply_gradients(
                 zip(self.critic_gradients, self.network_params))
 
             self.own_global_vars = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES, 'critic_global_' + str(scope[-1]))
-            self.apply_own_grads = self.trainer(self.lr_rate).apply_gradients(
+            self.apply_own_grads = self.trainer.apply_gradients(
                 zip(self.critic_gradients, self.own_global_vars))
 
             self.others_list = [int(x) for x in range(
@@ -218,7 +257,7 @@ class CriticNetwork(object):
             self.feed_gradients = [tf.reshape(tf.placeholder(
                 shape=[None], dtype=tf.float32), grad.shape) for grad in self.critic_gradients]
 
-            self.apply_other_grads = [self.trainer(self.lr_rate).apply_gradients(zip(
+            self.apply_other_grads = [self.trainer.apply_gradients(zip(
                 self.feed_gradients, other_global_vars[i])) for i in range(len(self.others_list))]
         return
 
@@ -248,10 +287,18 @@ class CriticNetwork(object):
                                        split_4_flat,
                                        split_5], 'concat')
             dense_net_0 = tflearn.fully_connected(
-                merge_net, 128, activation='relu')
+                merge_net, 256, activation='relu')
+            dense_net_0 = tflearn.fully_connected(
+                dense_net_0, 256, activation='relu')
+            dense_net_0 = tflearn.fully_connected(
+                dense_net_0, 256, activation='relu')
+
             out = tflearn.fully_connected(dense_net_0, 1, activation='linear')
             return (inputs, out)
         return
+
+    def set_learning_rate(self, lr):
+        self.lr_rate = lr
 
     def train(self, sess, inputs, td_target):
         return sess.run([self.loss, self.optimize], feed_dict={self.inputs: inputs,
@@ -269,7 +316,11 @@ class CriticNetwork(object):
                                                           self.td_target: td_target})
 
     def apply_gradients(self, sess, critic_gradients):
-        return sess.run([self.optimize, self.apply_own_grads], feed_dict={i: d for i, d in zip(self.critic_gradients, critic_gradients)})
+        feed_dict = {i: d for i, d in zip(
+            self.critic_gradients, critic_gradients)}
+        feed_dict[self.lr_placeholder] = self.lr_rate
+
+        return sess.run([self.optimize, self.apply_own_grads], feed_dict=feed_dict)
 
     def get_network_params(self, sess):
         return sess.run(self.network_params)

@@ -1,22 +1,54 @@
 import threading
-from time import sleep
+from time import sleep, time
 import load_trace
 from a3c_gs import ActorNetwork, CriticNetwork, compute_gradients
+from run_tests import run_tests
 import env
 import tensorflow as tf
 import os
 import logging
 import numpy as np
 import multiprocessing as mp
-from rl_test_gs import run_tests
+from Queue import Queue
+# from rl_test_gs import run_tests
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+#lr = 0.0003
+# entropy = 0.3
+# 3 global 2 workers
+
+# lr: actor: 0.0001 critic: 0.001
+# 4 global 2 workers
+# entropy : 6,4,2,1,0.5,0.3,0.05,0.01 every 10k
+# started testing after 1 lakh
+# save interval 2000
+# highest av is 35-36
+# total 1.3 lakh epochs
+# final layer 128
+
+# lr: actor: 0.0001 critic: 0.001
+# 4 global 2 workers
+# entropy : 5,4,2,1,0.5,0.3,0.05,0.01 every 10k
+# started testing after 1 lakh
+# save interval 2000
+# highest av is 37-39
+# total 1.3 lakh epochs
+# final layer 128,128,64
+
+# same hyper params
+# NN net has 3 128 layers
+# highest is 39.8
+
+# same hyper params
+# NN net has 3 256 layers
+# After 1 lakh epochs reduce entropy to 0.005
 
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
 S_INFO = 6
 S_LEN = 8  # take how many frames in the past
 A_DIM = 6
-ACTOR_LR_RATE = 0.001
+ACTOR_LR_RATE = 0.0001
 CRITIC_LR_RATE = 0.001
 NUM_AGENTS = 16
 TRAIN_SEQ_LEN = 100  # take as a train batch
@@ -37,22 +69,28 @@ TEST_LOG_FOLDER = './test_results_gs/'
 TRAIN_TRACES = './cooked_traces/'
 # NN_MODEL = './results/pretrain_linear_reward.ckpt'
 NN_MODEL = None
-GLOBAL_WORKERS = 3
+GLOBAL_WORKERS = 4
 NUM_WORKERS = 2
-EPOCHS = 100000
+EPOCHS = 200000
+ENTROPY_WEIGHT = 5
 
 
 class Worker():
-    def __init__(self, global_assignment, name, all_cooked_time, all_cooked_bw, saver_thread):
+    def __init__(self, global_assignment, name, all_cooked_time, all_cooked_bw, saver_thread, queue, global_actor):
         self.name = str(name)+"_worker_" + str(global_assignment)
         self.global_assignment = self.name[-1]  # get global assignment index
         self.local_actor = ActorNetwork(state_dim=[
-                                        S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=GLOBAL_WORKERS, scope="actor_" + self.name)
+                                        S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=GLOBAL_WORKERS, scope="actor_" + self.name, entropy_weight=ENTROPY_WEIGHT)
         self.local_critic = CriticNetwork(state_dim=[
-                                          S_INFO, S_LEN], learning_rate=ACTOR_LR_RATE, global_workers=GLOBAL_WORKERS, scope="critic_" + self.name)
+                                          S_INFO, S_LEN], learning_rate=CRITIC_LR_RATE, global_workers=GLOBAL_WORKERS, scope="critic_" + self.name)
         self.env = env.Environment(
             all_cooked_time=all_cooked_time, all_cooked_bw=all_cooked_bw)
         self.saver_thread = saver_thread
+
+        self.global_actor = global_actor
+
+        if self.saver_thread:
+            self.queue = queue
 
     def train(self, sess, actor_gradient, critic_gradient):
         self.local_actor.apply_gradients(sess, actor_gradient)
@@ -76,8 +114,11 @@ class Worker():
 
         feed_dict_actor = {k: v for (k, v) in zip(
             self.local_actor.feed_gradients, actor_gradient)}
+        feed_dict_actor[self.local_actor.lr_placeholder] = self.local_actor.lr_rate
+        feed_dict_actor[self.local_actor.entropy_weight_placeholder] = self.local_actor.entropy_weight
         feed_dict_critic = {k: v for (k, v) in zip(
             self.local_critic.feed_gradients, critic_gradient)}
+        feed_dict_critic[self.local_critic.lr_placeholder] = self.local_critic.lr_rate
 
         for i in range(GLOBAL_WORKERS):
             # activate all locks
@@ -95,7 +136,8 @@ class Worker():
         # for i in range(len(self.other_ids)): sess.run(self.local_AC.apply_other_grads[int(i)], feed_dict=feed_dict) #apply grads to all other global parameters
         # for i in range(GLOBAL_WORKERS): sess.run(self.local_critic.unblock_global[int(i)]) #de-activate all locks
 
-    def work(self, sess, coord, saver):
+    def work(self, sess):
+        print('started worker ' + str(self.global_assignment))
 
         test_log_file_path = LOG_FILE + '_test_' + str(self.global_assignment)
 
@@ -103,6 +145,10 @@ class Worker():
 
             self.local_actor.transfer_global_params(sess)
             self.local_critic.transfer_global_params(sess)
+
+            # if self.saver_thread:
+            #     self.saver = tf.train.Saver(var_list=[x for x in tf.get_collection(
+            #         tf.GraphKeys.TRAINABLE_VARIABLES) if 'global_' + str(self.global_assignment) in x.name])
 
             epoch = 0
             last_bit_rate = DEFAULT_QUALITY
@@ -118,6 +164,42 @@ class Worker():
 
             time_stamp = 0
             while epoch < EPOCHS:  # experience video streaming forever
+
+                if epoch % 1000 == 0:
+                    print(self.name + " in epoch " + str(epoch))
+
+                if epoch == 10000:
+                    self.local_actor.entropy_weight = 4
+
+                if epoch == 20000:
+                    self.local_actor.entropy_weight = 2
+                if epoch == 30000:
+                    self.local_actor.entropy_weight = 1
+
+                if epoch == 40000:
+                    self.local_actor.entropy_weight = 0.5
+                if epoch == 50000:
+                    self.local_actor.entropy_weight = 0.3
+
+                if epoch == 60000:
+                    self.local_actor.entropy_weight = 0.05
+
+                if epoch == 70000:
+                    self.local_actor.entropy_weight = 0.01
+
+                if epoch == 100000:
+                    self.local_actor.entropy_weight = 0.005
+
+                if epoch == 130000:
+                    self.local_actor.entropy_weight = 0.001
+
+                if epoch == 170000:
+                    self.local_actor.entropy_weight = 0.0005
+
+                # if epoch == 8000:
+                #     print('changed lr in epoch ' + str(epoch))
+                #     self.local_actor.set_learning_rate(0.000003)
+                #     self.local_critic.set_learning_rate(0.000003)
 
                 # the action is from the last decision
                 # this is to make the framework similar to the real
@@ -211,6 +293,9 @@ class Worker():
 
                     self.train(sess, actor_gradient, critic_gradient)
 
+                    self.local_actor.update_local_params(sess)
+                    self.local_critic.update_local_params(sess)
+
                     del s_batch[:]
                     del a_batch[:]
                     del r_batch[:]
@@ -237,55 +322,65 @@ class Worker():
                     action_vec[bit_rate] = 1
                     a_batch.append(action_vec)
 
-                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread and epoch >= 100000:
                     # Save the neural net parameters to disk.
                     # save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
                     #                     str(epoch) + ".ckpt")
-                    self.local_actor.update_local_params(sess)
+                    # self.local_actor.update_local_params(sess)
+                    # self.local_critic.update_local_params(sess)
+                    # print('saving epoch ', epoch,
+                    #       ' for global var ', self.global_assignment)
 
-                    self.testing(sess, epoch, test_log_file)
+                    # self.testing(sess, epoch, test_log_file)
+                    # print('saved epoch ', epoch, ' for global var ',
+                    #       self.global_assignment)
+                    params = self.global_actor.get_network_params(sess)
+                    self.queue.put({'epoch': epoch, 'params': params})
 
-    def testing(self, sess, epoch, log_file):
-        # clean up the test results folder
-        thread_test_folder = TEST_LOG_FOLDER + self.global_assignment + '/'
-        os.system('rm -r ' + thread_test_folder)
-        os.system('mkdir ' + thread_test_folder)
+            if self.saver_thread:
+                self.queue.put({'epoch': 'finished'})
 
-        # run test script
-        # os.system('python rl_test.py ' + nn_model)
-        run_tests(sess, self.local_actor, self.global_assignment)
+    # def testing(self, sess, epoch, log_file):
+    #     # clean up the test results folder
+    #     thread_test_folder = TEST_LOG_FOLDER + self.global_assignment + '/'
+    #     os.system('rm -r ' + thread_test_folder)
+    #     os.system('mkdir ' + thread_test_folder)
 
-        # append test performance to the log
-        rewards = []
-        test_log_files = os.listdir(thread_test_folder)
-        for test_log_file in test_log_files:
-            reward = []
-            with open(thread_test_folder + test_log_file, 'rb') as f:
-                for line in f:
-                    parse = line.split()
-                    try:
-                        reward.append(float(parse[-1]))
-                    except IndexError:
-                        break
-            rewards.append(np.sum(reward[1:]))
+    #     # run test script
+    #     # os.system('python rl_test.py ' + nn_model)
+    #     # run_tests(sess, self.local_actor, self.global_assignment)
 
-        rewards = np.array(rewards)
+    #     # append test performance to the log
+    #     rewards = []
+    #     test_log_files = os.listdir(thread_test_folder)
+    #     for test_log_file in test_log_files:
+    #         reward = []
+    #         with open(thread_test_folder + test_log_file, 'rb') as f:
+    #             for line in f:
+    #                 parse = line.split()
+    #                 try:
+    #                     reward.append(float(parse[-1]))
+    #                 except IndexError:
+    #                     break
+    #         rewards.append(np.sum(reward[1:]))
 
-        rewards_min = np.min(rewards)
-        rewards_5per = np.percentile(rewards, 5)
-        rewards_mean = np.mean(rewards)
-        rewards_median = np.percentile(rewards, 50)
-        rewards_95per = np.percentile(rewards, 95)
-        rewards_max = np.max(rewards)
+    #     rewards = np.array(rewards)
 
-        log_file.write(str(epoch) + '\t' +
-                       str(rewards_min) + '\t' +
-                       str(rewards_5per) + '\t' +
-                       str(rewards_mean) + '\t' +
-                       str(rewards_median) + '\t' +
-                       str(rewards_95per) + '\t' +
-                       str(rewards_max) + '\n')
-        log_file.flush()
+    #     rewards_min = np.min(rewards)
+    #     rewards_5per = np.percentile(rewards, 5)
+    #     rewards_mean = np.mean(rewards)
+    #     rewards_median = np.percentile(rewards, 50)
+    #     rewards_95per = np.percentile(rewards, 95)
+    #     rewards_max = np.max(rewards)
+
+    #     log_file.write(str(epoch) + '\t' +
+    #                    str(rewards_min) + '\t' +
+    #                    str(rewards_5per) + '\t' +
+    #                    str(rewards_mean) + '\t' +
+    #                    str(rewards_median) + '\t' +
+    #                    str(rewards_95per) + '\t' +
+    #                    str(rewards_max) + '\n')
+    #     log_file.flush()
 
 
 def main():
@@ -297,38 +392,56 @@ def main():
 
     global_actors = []
     global_critics = []
+    testing_actors = []
 
     workers = []
-
+    queues = []
     all_cooked_time, all_cooked_bw, _ = load_trace.load_trace(TRAIN_TRACES)
 
     for i in range(GLOBAL_WORKERS):
+        queues.append(Queue())
         agent_name = 'global_'+str(i)
+        os.system('rm -r ' + SUMMARY_DIR + '/' + agent_name)
+        os.system('mkdir ' + SUMMARY_DIR + '/' + agent_name)
+
         global_actors.append(ActorNetwork(state_dim=[
-                             S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=None, scope='actor_'+agent_name))
+                             S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=None, scope='actor_'+agent_name, entropy_weight=None))
         global_critics.append(CriticNetwork(state_dim=[
                               S_INFO, S_LEN], learning_rate=CRITIC_LR_RATE, global_workers=GLOBAL_WORKERS, scope='critic_'+agent_name))
+        testing_actors.append(ActorNetwork(state_dim=[
+            S_INFO, S_LEN], action_dim=A_DIM, learning_rate=ACTOR_LR_RATE, global_workers=None, scope='testing_actor_'+agent_name, entropy_weight=None))
 
     for j in range(GLOBAL_WORKERS):
         for i in range(NUM_WORKERS):
             workers.append(Worker(global_assignment=j, name=i, all_cooked_time=all_cooked_time,
-                           all_cooked_bw=all_cooked_bw, saver_thread=i == 0))  # create workers for each global parameter set
-
-    saver = tf.train.Saver(max_to_keep=5)
+                           all_cooked_bw=all_cooked_bw, saver_thread=i == 0, queue=queues[j] if i == 0 else None, global_actor=global_actors[j]))  # create workers for each global parameter set
 
     with tf.Session() as sess:
-        coord = tf.train.Coordinator()
+
         sess.run(tf.global_variables_initializer())
+
+        testing_threads = []
+        for i in range(GLOBAL_WORKERS):
+            def tester_work(): return run_tests(
+                sess, queues[i], testing_actors[i])
+            t = threading.Thread(target=(tester_work))
+            t.start()
+            testing_threads.append(t)
+            sleep(0.1)
 
         worker_threads = []
         for worker in workers:
-            def worker_work(): return worker.work(sess, coord, saver)
+            def worker_work(): return worker.work(sess)
             # threading operator to run multiple workers
             t = threading.Thread(target=(worker_work))
             t.start()
-            sleep(0.5)
+            sleep(0.1)
             worker_threads.append(t)
-        coord.join(worker_threads)
+
+        for t in worker_threads:
+            t.join()
+        for t in testing_threads:
+            t.join()
 
 
 if __name__ == '__main__':
