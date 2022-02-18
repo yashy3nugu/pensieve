@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import multiprocessing as mp
 from Queue import Queue
+import pickle
 # from rl_test_gs import run_tests
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
@@ -42,6 +43,12 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 # same hyper params
 # NN net has 3 256 layers
 # After 1 lakh epochs reduce entropy to 0.005
+#  hishest av 43
+
+# same hyper params
+# same architecture
+# dont drop entropy after 1 lakh epochs
+# highest av is 44
 
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
@@ -71,7 +78,7 @@ TRAIN_TRACES = './cooked_traces/'
 NN_MODEL = None
 GLOBAL_WORKERS = 4
 NUM_WORKERS = 2
-EPOCHS = 200000
+EPOCHS = 120000
 ENTROPY_WEIGHT = 5
 
 
@@ -187,14 +194,8 @@ class Worker():
                 if epoch == 70000:
                     self.local_actor.entropy_weight = 0.01
 
-                if epoch == 100000:
-                    self.local_actor.entropy_weight = 0.005
-
-                if epoch == 130000:
-                    self.local_actor.entropy_weight = 0.001
-
-                if epoch == 170000:
-                    self.local_actor.entropy_weight = 0.0005
+                # if epoch == 110000:
+                #     self.local_actor.entropy_weight = 0.005
 
                 # if epoch == 8000:
                 #     print('changed lr in epoch ' + str(epoch))
@@ -322,7 +323,7 @@ class Worker():
                     action_vec[bit_rate] = 1
                     a_batch.append(action_vec)
 
-                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread and epoch >= 100000:
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
                     # Save the neural net parameters to disk.
                     # save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
                     #                     str(epoch) + ".ckpt")
@@ -334,8 +335,14 @@ class Worker():
                     # self.testing(sess, epoch, test_log_file)
                     # print('saved epoch ', epoch, ' for global var ',
                     #       self.global_assignment)
+                    save_path = SUMMARY_DIR + '/global_' + self.global_assignment + \
+                        '/nn_model_' + str(epoch) + '.pickle'
+                    f = open(save_path, 'wb')
+
                     params = self.global_actor.get_network_params(sess)
-                    self.queue.put({'epoch': epoch, 'params': params})
+                    pickle.dump(params, f)
+                    self.queue.put({'epoch': epoch, 'save_path': save_path})
+                    f.close()
 
             if self.saver_thread:
                 self.queue.put({'epoch': 'finished'})
@@ -442,6 +449,8 @@ def main():
             t.join()
         for t in testing_threads:
             t.join()
+
+        sess.close()
 
 
 if __name__ == '__main__':

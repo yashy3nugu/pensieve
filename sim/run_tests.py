@@ -5,6 +5,7 @@ from a3c_gs import ActorNetwork
 import env
 from load_trace import load_trace
 import os
+import pickle
 
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
@@ -45,7 +46,14 @@ def run_tests(sess, queue, actor):
                 epoch = data['epoch']
                 if epoch == 'finished':
                     break
-                params = data['params']
+                # params = data['params']
+                save_path = data['save_path']
+                f = open(save_path, 'rb')
+                params = pickle.load(f)
+                f.close()
+
+                if epoch < 100000:
+                    os.system('rm ' + save_path)
 
                 actor.load_network_params(sess, params)
                 print('testing for epoch: ' + str(epoch) +
