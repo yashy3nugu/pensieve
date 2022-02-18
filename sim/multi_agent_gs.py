@@ -194,8 +194,8 @@ class Worker():
                 if epoch == 70000:
                     self.local_actor.entropy_weight = 0.01
 
-                # if epoch == 110000:
-                #     self.local_actor.entropy_weight = 0.005
+                if epoch == 100000:
+                    self.local_actor.entropy_weight = 0.005
 
                 # if epoch == 8000:
                 #     print('changed lr in epoch ' + str(epoch))
@@ -323,7 +323,7 @@ class Worker():
                     action_vec[bit_rate] = 1
                     a_batch.append(action_vec)
 
-                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread and epoch >= 100000:
                     # Save the neural net parameters to disk.
                     # save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
                     #                     str(epoch) + ".ckpt")
@@ -335,59 +335,14 @@ class Worker():
                     # self.testing(sess, epoch, test_log_file)
                     # print('saved epoch ', epoch, ' for global var ',
                     #       self.global_assignment)
-                    save_path = SUMMARY_DIR + '/global_' + self.global_assignment + \
-                        '/nn_model_' + str(epoch) + '.pickle'
-                    f = open(save_path, 'wb')
 
                     params = self.global_actor.get_network_params(sess)
-                    pickle.dump(params, f)
-                    self.queue.put({'epoch': epoch, 'save_path': save_path})
-                    f.close()
+
+                    self.queue.put(
+                        {'epoch': epoch, 'params': params})
 
             if self.saver_thread:
                 self.queue.put({'epoch': 'finished'})
-
-    # def testing(self, sess, epoch, log_file):
-    #     # clean up the test results folder
-    #     thread_test_folder = TEST_LOG_FOLDER + self.global_assignment + '/'
-    #     os.system('rm -r ' + thread_test_folder)
-    #     os.system('mkdir ' + thread_test_folder)
-
-    #     # run test script
-    #     # os.system('python rl_test.py ' + nn_model)
-    #     # run_tests(sess, self.local_actor, self.global_assignment)
-
-    #     # append test performance to the log
-    #     rewards = []
-    #     test_log_files = os.listdir(thread_test_folder)
-    #     for test_log_file in test_log_files:
-    #         reward = []
-    #         with open(thread_test_folder + test_log_file, 'rb') as f:
-    #             for line in f:
-    #                 parse = line.split()
-    #                 try:
-    #                     reward.append(float(parse[-1]))
-    #                 except IndexError:
-    #                     break
-    #         rewards.append(np.sum(reward[1:]))
-
-    #     rewards = np.array(rewards)
-
-    #     rewards_min = np.min(rewards)
-    #     rewards_5per = np.percentile(rewards, 5)
-    #     rewards_mean = np.mean(rewards)
-    #     rewards_median = np.percentile(rewards, 50)
-    #     rewards_95per = np.percentile(rewards, 95)
-    #     rewards_max = np.max(rewards)
-
-    #     log_file.write(str(epoch) + '\t' +
-    #                    str(rewards_min) + '\t' +
-    #                    str(rewards_5per) + '\t' +
-    #                    str(rewards_mean) + '\t' +
-    #                    str(rewards_median) + '\t' +
-    #                    str(rewards_95per) + '\t' +
-    #                    str(rewards_max) + '\n')
-    #     log_file.flush()
 
 
 def main():

@@ -46,14 +46,7 @@ def run_tests(sess, queue, actor):
                 epoch = data['epoch']
                 if epoch == 'finished':
                     break
-                # params = data['params']
-                save_path = data['save_path']
-                f = open(save_path, 'rb')
-                params = pickle.load(f)
-                f.close()
-
-                if epoch < 100000:
-                    os.system('rm ' + save_path)
+                params = data['params']
 
                 actor.load_network_params(sess, params)
                 print('testing for epoch: ' + str(epoch) +
