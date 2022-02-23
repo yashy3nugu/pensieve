@@ -14,42 +14,6 @@ import pickle
 # from rl_test_gs import run_tests
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
-#lr = 0.0003
-# entropy = 0.3
-# 3 global 2 workers
-
-# lr: actor: 0.0001 critic: 0.001
-# 4 global 2 workers
-# entropy : 6,4,2,1,0.5,0.3,0.05,0.01 every 10k
-# started testing after 1 lakh
-# save interval 2000
-# highest av is 35-36
-# total 1.3 lakh epochs
-# final layer 128
-
-# lr: actor: 0.0001 critic: 0.001
-# 4 global 2 workers
-# entropy : 5,4,2,1,0.5,0.3,0.05,0.01 every 10k
-# started testing after 1 lakh
-# save interval 2000
-# highest av is 37-39
-# total 1.3 lakh epochs
-# final layer 128,128,64
-
-# same hyper params
-# NN net has 3 128 layers
-# highest is 39.8
-
-# same hyper params
-# NN net has 3 256 layers
-# After 1 lakh epochs reduce entropy to 0.005
-#  hishest av 43
-
-# same hyper params
-# same architecture
-# dont drop entropy after 1 lakh epochs
-# highest av is 44
-
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
 S_INFO = 6
