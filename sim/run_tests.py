@@ -116,14 +116,6 @@ def run_actor(sess, actor, global_assignment):
         '_' + all_file_names[net_env.trace_idx]
     log_file = open(log_path, 'wb')
 
-    # saver = tf.train.Saver(var_list=tf.get_collection(
-    #     tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope))  # save neural net parameters
-
-    # # restore neural net parameters
-    # if nn_model is not None:  # NN_MODEL is the path to file
-    #     saver.restore(sess, nn_model)
-    #     print("Testing model restored.")
-
     time_stamp = 0
 
     last_bit_rate = DEFAULT_QUALITY

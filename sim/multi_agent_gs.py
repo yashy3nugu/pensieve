@@ -106,13 +106,8 @@ class Worker():
         self.other_ids = list(range(GLOBAL_WORKERS))
         del self.other_ids[int(self.global_assignment)]
 
-        # self.block_global = [tf.assign(self.block_vars[i],[False]) for i in range(global_workers)] #handle to activate lock
-        # self.unblock_global = [tf.assign(self.block_vars[i],[True]) for i in range(global_workers)] #handle to deactivate lock
-
         self.actor_block_stats = self.local_actor.get_block_vars(sess)
-        # self.critic_block_stats = self.local_critic.get_block_vars(sess)
         self.valid_actor_updates = list(np.array(self.actor_block_stats))
-        # self.valid_critic_updates = list(np.array(self.critic_block_stats))
 
         # loop until all locks are de-activated
         while not all([v == True for v in self.valid_actor_updates]):
@@ -139,10 +134,6 @@ class Worker():
             # de-activate all locks
             sess.run(self.local_actor.unblock_global[int(i)])
 
-        #
-        # for i in range(len(self.other_ids)): sess.run(self.local_AC.apply_other_grads[int(i)], feed_dict=feed_dict) #apply grads to all other global parameters
-        # for i in range(GLOBAL_WORKERS): sess.run(self.local_critic.unblock_global[int(i)]) #de-activate all locks
-
     def work(self, sess):
         print('started worker ' + str(self.global_assignment))
 
@@ -152,10 +143,6 @@ class Worker():
 
             self.local_actor.transfer_global_params(sess)
             self.local_critic.transfer_global_params(sess)
-
-            # if self.saver_thread:
-            #     self.saver = tf.train.Saver(var_list=[x for x in tf.get_collection(
-            #         tf.GraphKeys.TRAINABLE_VARIABLES) if 'global_' + str(self.global_assignment) in x.name])
 
             epoch = 0
             last_bit_rate = DEFAULT_QUALITY
@@ -196,11 +183,6 @@ class Worker():
 
                 if epoch == 100000:
                     self.local_actor.entropy_weight = 0.005
-
-                # if epoch == 8000:
-                #     print('changed lr in epoch ' + str(epoch))
-                #     self.local_actor.set_learning_rate(0.000003)
-                #     self.local_critic.set_learning_rate(0.000003)
 
                 # the action is from the last decision
                 # this is to make the framework similar to the real
@@ -323,20 +305,14 @@ class Worker():
                     action_vec[bit_rate] = 1
                     a_batch.append(action_vec)
 
-                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread and epoch >= 100000:
-                    # Save the neural net parameters to disk.
-                    # save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
-                    #                     str(epoch) + ".ckpt")
-                    # self.local_actor.update_local_params(sess)
-                    # self.local_critic.update_local_params(sess)
-                    # print('saving epoch ', epoch,
-                    #       ' for global var ', self.global_assignment)
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
 
-                    # self.testing(sess, epoch, test_log_file)
-                    # print('saved epoch ', epoch, ' for global var ',
-                    #       self.global_assignment)
-
+                    save_path = SUMMARY_DIR + '/global_' + self.global_assignment + \
+                        '/nn_model_' + str(epoch) + '.pickle'
+                    f = open(save_path, 'wb')
                     params = self.global_actor.get_network_params(sess)
+                    pickle.dump(params, f)
+                    f.close()
 
                     self.queue.put(
                         {'epoch': epoch, 'params': params})
