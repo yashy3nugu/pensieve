@@ -29,7 +29,7 @@ HD_REWARD = [1, 2, 3, 12, 15, 20]
 BUFFER_NORM_FACTOR = 10.0
 CHUNK_TIL_VIDEO_END_CAP = 48.0
 M_IN_K = 1000.0
-REBUF_PENALTY = 4.3  # 1 sec rebuffering -> 3 Mbps
+REBUF_PENALTY = 2.66  # 1 sec rebuffering -> 3 Mbps
 SMOOTH_PENALTY = 1
 DEFAULT_QUALITY = 1  # default video quality without agent
 RANDOM_SEED = 42
@@ -42,7 +42,7 @@ TRAIN_TRACES = './cooked_traces/'
 NN_MODEL = None
 GLOBAL_WORKERS = 4
 NUM_WORKERS = 2
-EPOCHS = 120000
+EPOCHS = 100000
 ENTROPY_WEIGHT = 5
 
 
@@ -82,6 +82,7 @@ class Worker():
             self.local_actor.feed_gradients, actor_gradient)}
         feed_dict_actor[self.local_actor.lr_placeholder] = self.local_actor.lr_rate
         feed_dict_actor[self.local_actor.entropy_weight_placeholder] = self.local_actor.entropy_weight
+
         feed_dict_critic = {k: v for (k, v) in zip(
             self.local_critic.feed_gradients, critic_gradient)}
         feed_dict_critic[self.local_critic.lr_placeholder] = self.local_critic.lr_rate
@@ -97,6 +98,26 @@ class Worker():
         for i in range(GLOBAL_WORKERS):
             # de-activate all locks
             sess.run(self.local_actor.unblock_global[int(i)])
+
+    def set_entropy(self, epoch):
+        if epoch == 10000:
+            self.local_actor.entropy_weight = 4
+
+        if epoch == 20000:
+            self.local_actor.entropy_weight = 2
+        if epoch == 30000:
+            self.local_actor.entropy_weight = 1
+
+        if epoch == 40000:
+            self.local_actor.entropy_weight = 0.5
+        if epoch == 50000:
+            self.local_actor.entropy_weight = 0.3
+
+        if epoch == 60000:
+            self.local_actor.entropy_weight = 0.05
+
+        if epoch == 70000:
+            self.local_actor.entropy_weight = 0.01
 
     def work(self, sess):
         print('started worker ' + str(self.global_assignment))
@@ -126,27 +147,7 @@ class Worker():
                 if epoch % 1000 == 0:
                     print(self.name + " in epoch " + str(epoch))
 
-                if epoch == 10000:
-                    self.local_actor.entropy_weight = 4
-
-                if epoch == 20000:
-                    self.local_actor.entropy_weight = 2
-                if epoch == 30000:
-                    self.local_actor.entropy_weight = 1
-
-                if epoch == 40000:
-                    self.local_actor.entropy_weight = 0.5
-                if epoch == 50000:
-                    self.local_actor.entropy_weight = 0.3
-
-                if epoch == 60000:
-                    self.local_actor.entropy_weight = 0.05
-
-                if epoch == 70000:
-                    self.local_actor.entropy_weight = 0.01
-
-                if epoch == 100000:
-                    self.local_actor.entropy_weight = 0.005
+                self.set_entropy(epoch)
 
                 # the action is from the last decision
                 # this is to make the framework similar to the real
@@ -160,23 +161,27 @@ class Worker():
 
                 # -- linear reward --
                 # reward is video quality - rebuffer penalty - smoothness
-                reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
-                    - REBUF_PENALTY * rebuf \
-                    - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
-                                              VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
+                # reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
+                #     - REBUF_PENALTY * rebuf \
+                #     - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
+                #                               VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
 
                 # -- log scale reward --
-                # log_bit_rate = np.log(VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
-                # log_last_bit_rate = np.log(VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                log_bit_rate = np.log(
+                    VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                log_last_bit_rate = np.log(
+                    VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
 
-                # reward = log_bit_rate \
-                #          - REBUF_PENALTY * rebuf \
-                #          - SMOOTH_PENALTY * np.abs(log_bit_rate - log_last_bit_rate)
+                reward = log_bit_rate \
+                    - REBUF_PENALTY * rebuf \
+                    - SMOOTH_PENALTY * \
+                    np.abs(log_bit_rate - log_last_bit_rate)
 
                 # -- HD reward --
                 # reward = HD_REWARD[bit_rate] \
-                #          - REBUF_PENALTY * rebuf \
-                #          - SMOOTH_PENALTY * np.abs(HD_REWARD[bit_rate] - HD_REWARD[last_bit_rate])
+                #     - REBUF_PENALTY * rebuf \
+                #     - SMOOTH_PENALTY * \
+                #     np.abs(HD_REWARD[bit_rate] - HD_REWARD[last_bit_rate])
 
                 r_batch.append(reward)
 
