@@ -1,5 +1,5 @@
 import threading
-from time import sleep, time
+from time import gmtime, sleep, strftime, time
 import load_trace
 from a3c_gs import ActorNetwork, CriticNetwork, compute_gradients
 from run_tests import run_tests
@@ -11,6 +11,7 @@ import numpy as np
 import multiprocessing as mp
 from Queue import Queue
 import pickle
+import gc
 # from rl_test_gs import run_tests
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
@@ -29,7 +30,7 @@ HD_REWARD = [1, 2, 3, 12, 15, 20]
 BUFFER_NORM_FACTOR = 10.0
 CHUNK_TIL_VIDEO_END_CAP = 48.0
 M_IN_K = 1000.0
-REBUF_PENALTY = 2.66  # 1 sec rebuffering -> 3 Mbps
+REBUF_PENALTY = 4.3  # 1 sec rebuffering -> 3 Mbps
 SMOOTH_PENALTY = 1
 DEFAULT_QUALITY = 1  # default video quality without agent
 RANDOM_SEED = 42
@@ -122,6 +123,8 @@ class Worker():
     def work(self, sess):
         print('started worker ' + str(self.global_assignment))
 
+        start = time()
+
         test_log_file_path = LOG_FILE + '_test_' + str(self.global_assignment)
 
         with sess.as_default(), sess.graph.as_default(), open(LOG_FILE + self.name, 'wb') as log_file, open(test_log_file_path, 'wb') as test_log_file:
@@ -161,21 +164,21 @@ class Worker():
 
                 # -- linear reward --
                 # reward is video quality - rebuffer penalty - smoothness
-                # reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
-                #     - REBUF_PENALTY * rebuf \
-                #     - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
-                #                               VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
+                reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
+                    - REBUF_PENALTY * rebuf \
+                    - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
+                                              VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
 
                 # -- log scale reward --
-                log_bit_rate = np.log(
-                    VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
-                log_last_bit_rate = np.log(
-                    VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                # log_bit_rate = np.log(
+                #     VIDEO_BIT_RATE[bit_rate] / float(VIDEO_BIT_RATE[-1]))
+                # log_last_bit_rate = np.log(
+                #     VIDEO_BIT_RATE[last_bit_rate] / float(VIDEO_BIT_RATE[-1]))
 
-                reward = log_bit_rate \
-                    - REBUF_PENALTY * rebuf \
-                    - SMOOTH_PENALTY * \
-                    np.abs(log_bit_rate - log_last_bit_rate)
+                # reward = log_bit_rate \
+                #     - REBUF_PENALTY * rebuf \
+                #     - SMOOTH_PENALTY * \
+                #     np.abs(log_bit_rate - log_last_bit_rate)
 
                 # -- HD reward --
                 # reward = HD_REWARD[bit_rate] \
@@ -274,7 +277,7 @@ class Worker():
                     action_vec[bit_rate] = 1
                     a_batch.append(action_vec)
 
-                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread:
+                if epoch % MODEL_SAVE_INTERVAL == 0 and self.saver_thread and epoch >= 70000:
 
                     save_path = SUMMARY_DIR + '/global_' + self.global_assignment + \
                         '/nn_model_' + str(epoch) + '.pickle'
@@ -285,9 +288,17 @@ class Worker():
 
                     self.queue.put(
                         {'epoch': epoch, 'params': params})
+                    # del params
+                    # gc.collect()
 
             if self.saver_thread:
                 self.queue.put({'epoch': 'finished'})
+            end = time()
+            elapsed = strftime("%Hh%Mm%Ss", gmtime(end - start))
+            # write elapsed time for testing
+            with open(LOG_FILE + '_time_training_' + str(self.name), 'w') as f:
+                f.write(elapsed)
+                f.close()
 
 
 def main():

@@ -193,10 +193,11 @@ def central_agent(net_params_queues, exp_queues):
                 # Save the neural net parameters to disk.
                 save_path = saver.save(sess, SUMMARY_DIR + "/nn_model_ep_" +
                                        str(epoch) + ".ckpt")
-                logging.info("Model saved in file: " + save_path)
+                print("saving for epoch " + str(epoch))
                 testing(epoch, 
                     SUMMARY_DIR + "/nn_model_ep_" + str(epoch) + ".ckpt", 
                     test_log_file)
+                print("saved for epoch " + str(epoch))
 
 
 def agent(agent_id, all_cooked_time, all_cooked_bw, net_params_queue, exp_queue):

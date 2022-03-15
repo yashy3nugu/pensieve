@@ -1,3 +1,4 @@
+import gc
 import os
 import numpy as np
 import tensorflow as tf
@@ -5,6 +6,7 @@ from a3c_gs import ActorNetwork
 import env
 from load_trace import load_trace
 import os
+from time import time, strftime, gmtime
 import pickle
 
 
@@ -34,6 +36,7 @@ TEST_LOG_FOLDER = './test_results_gs/'
 
 def run_tests(sess, queue, actor):
 
+    elapsed = 0.0
     global_assignment = actor.scope[-1]
     print('started tester thread for actor ' + global_assignment)
     test_log_file_path = LOG_FILE + '_test_' + str(global_assignment)
@@ -49,11 +52,24 @@ def run_tests(sess, queue, actor):
                 params = data['params']
 
                 actor.load_network_params(sess, params)
+                # del params[:]
+                # del params
+                # gc.collect()
                 print('testing for epoch: ' + str(epoch) +
                       'for actor ' + global_assignment)
+                start = time()
                 testing(sess, test_log_file, actor, epoch, global_assignment)
+                end = time()
+                elapsed += end - start
                 print('saved for epoch: ' + str(epoch) +
                       'for actor ' + global_assignment)
+        test_log_file.close()
+
+    elapsed_string = strftime("%Hh%Mm%Ss", gmtime(elapsed))
+    # write elapsed time for testing
+    with open(LOG_FILE + '_time_testing_' + str(global_assignment), 'w') as f:
+        f.write(elapsed_string)
+        f.close()
 
 
 def testing(sess, log_file, actor, epoch, global_assignment):
