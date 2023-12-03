@@ -1,7 +1,7 @@
 import threading
 from time import gmtime, sleep, strftime, time
 import load_trace
-from a3c_gs import ActorNetwork, CriticNetwork, compute_gradients, compute_entropy
+from a3c_gs_vmaf_ppo import ActorNetwork, CriticNetwork, compute_gradients, compute_entropy
 from run_tests_vmaf import run_tests
 import env
 import tensorflow as tf
