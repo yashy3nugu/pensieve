@@ -1,11 +1,11 @@
-import os
-import numpy as np
+import fixed_env as env
+import a3c_gs
+import load_trace
 import tensorflow as tf
-from a3c_gs import ActorNetwork
-import env
-from load_trace import load_trace
+import numpy as np
 import os
-import pickle
+import sys
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
@@ -24,90 +24,21 @@ SMOOTH_PENALTY = 1
 DEFAULT_QUALITY = 1  # default video quality without agent
 RANDOM_SEED = 42
 RAND_RANGE = 1000
-LOG_FILE = './results_gs/log'
+LOG_FILE = './test_results_gs/log_sim_rl'
 LOG_FOLDER = './test_results_gs/'
 TEST_TRACES = './cooked_test_traces/'
-TEST_LOG_FOLDER = './test_results_gs/'
 # log in format of time_stamp bit_rate buffer_size rebuffer_time chunk_size download_time reward
 # NN_MODEL = sys.argv[1]
 # GLOBAL_ASSIGNMENT = sys.argv[2]
 
 
-def run_tests(sess, queue, actor):
-
-    global_assignment = actor.scope[-1]
-    print('started tester thread for actor ' + global_assignment)
-    test_log_file_path = LOG_FILE + '_test_' + str(global_assignment)
-
-    with open(test_log_file_path, 'wb') as test_log_file:
-
-        while True:
-            if not queue.empty():
-                data = queue.get()
-                epoch = data['epoch']
-                if epoch == 'finished':
-                    break
-                params = data['params']
-
-                actor.load_network_params(sess, params)
-                print('testing for epoch: ' + str(epoch) +
-                      'for actor ' + global_assignment)
-                testing(sess, test_log_file, actor, epoch, global_assignment)
-                print('saved for epoch: ' + str(epoch) +
-                      'for actor ' + global_assignment)
-
-
-def testing(sess, log_file, actor, epoch, global_assignment):
-
-    # clean up the test results folder
-    thread_test_folder = TEST_LOG_FOLDER + global_assignment + '/'
-    os.system('rm -r ' + thread_test_folder)
-    os.system('mkdir ' + thread_test_folder)
-
-    # run test script
-    # os.system('python rl_test.py ' + nn_model)
-    run_actor(sess, actor, global_assignment)
-
-    # append test performance to the log
-    rewards = []
-    test_log_files = os.listdir(thread_test_folder)
-    for test_log_file in test_log_files:
-        reward = []
-        with open(thread_test_folder + test_log_file, 'rb') as f:
-            for line in f:
-                parse = line.split()
-                try:
-                    reward.append(float(parse[-1]))
-                except IndexError:
-                    break
-        rewards.append(np.sum(reward[1:]))
-
-    rewards = np.array(rewards)
-
-    rewards_min = np.min(rewards)
-    rewards_5per = np.percentile(rewards, 5)
-    rewards_mean = np.mean(rewards)
-    rewards_median = np.percentile(rewards, 50)
-    rewards_95per = np.percentile(rewards, 95)
-    rewards_max = np.max(rewards)
-
-    log_file.write(str(epoch) + '\t' +
-                   str(rewards_min) + '\t' +
-                   str(rewards_5per) + '\t' +
-                   str(rewards_mean) + '\t' +
-                   str(rewards_median) + '\t' +
-                   str(rewards_95per) + '\t' +
-                   str(rewards_max) + '\n')
-    log_file.flush()
-
-
-def run_actor(sess, actor, global_assignment):
+def run_tests(sess, actor, global_assignment):
 
     np.random.seed(RANDOM_SEED)
 
     assert len(VIDEO_BIT_RATE) == A_DIM
 
-    all_cooked_time, all_cooked_bw, all_file_names = load_trace(
+    all_cooked_time, all_cooked_bw, all_file_names = load_trace.load_trace(
         TEST_TRACES)
 
     net_env = env.Environment(all_cooked_time=all_cooked_time,
@@ -116,6 +47,14 @@ def run_actor(sess, actor, global_assignment):
     log_path = LOG_FOLDER + global_assignment + '/log_sim_rl' + \
         '_' + all_file_names[net_env.trace_idx]
     log_file = open(log_path, 'wb')
+
+    # saver = tf.train.Saver(var_list=tf.get_collection(
+    #     tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope))  # save neural net parameters
+
+    # # restore neural net parameters
+    # if nn_model is not None:  # NN_MODEL is the path to file
+    #     saver.restore(sess, nn_model)
+    #     print("Testing model restored.")
 
     time_stamp = 0
 
@@ -195,6 +134,8 @@ def run_actor(sess, actor, global_assignment):
 
         a_batch_num.append(bit_rate)
 
+        entropy_record.append(a3c_gs.compute_entropy(action_prob[0]))
+    
         if end_of_video:
             log_file.write('\n')
             log_file.close()

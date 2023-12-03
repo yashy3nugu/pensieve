@@ -15,6 +15,7 @@ PACKET_SIZE = 1500  # bytes
 NOISE_LOW = 0.9
 NOISE_HIGH = 1.1
 VIDEO_SIZE_FILE = './video_size_'
+VMAF = './envivo/vmaf/video'
 
 
 class Environment:
@@ -46,12 +47,21 @@ class Environment:
                 for line in f:
                     self.video_size[bitrate].append(int(line.split()[0]))
 
+        self.vmaf_size = {}
+        for bitrate in xrange(BITRATE_LEVELS):
+            self.vmaf_size[bitrate] = []
+            with open(VMAF + str(BITRATE_LEVELS - bitrate)) as f:
+                for line in f:
+                    self.vmaf_size[bitrate].append(float(line))
+
+
     def get_video_chunk(self, quality):
 
         assert quality >= 0
         assert quality < BITRATE_LEVELS
 
         video_chunk_size = self.video_size[quality][self.video_chunk_counter]
+        video_chunk_vmaf = self.vmaf_size[quality][self.video_chunk_counter]
         
         # use the delivery opportunity in mahimahi
         delay = 0.0  # in ms
@@ -163,4 +173,4 @@ class Environment:
             video_chunk_size, \
             next_video_chunk_sizes, \
             end_of_video, \
-            video_chunk_remain
+            video_chunk_remain, video_chunk_vmaf

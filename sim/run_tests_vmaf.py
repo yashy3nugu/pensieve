@@ -9,7 +9,7 @@ import pickle
 
 
 # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
-S_INFO = 6
+S_INFO = 7
 S_LEN = 8  # take how many frames in the past
 A_DIM = 6
 ACTOR_LR_RATE = 0.0001
@@ -31,6 +31,7 @@ TEST_LOG_FOLDER = './test_results_gs/'
 # log in format of time_stamp bit_rate buffer_size rebuffer_time chunk_size download_time reward
 # NN_MODEL = sys.argv[1]
 # GLOBAL_ASSIGNMENT = sys.argv[2]
+VMAF = './envivo/vmaf/video'
 
 
 def run_tests(sess, queue, actor):
@@ -121,9 +122,19 @@ def run_actor(sess, actor, global_assignment):
 
     last_bit_rate = DEFAULT_QUALITY
     bit_rate = DEFAULT_QUALITY
+    last_chunk_vmaf = None
 
     action_vec = np.zeros(A_DIM)
     action_vec[bit_rate] = 1
+
+    vmaf_size = {}
+    for bitrate in range(A_DIM):
+        
+        vmaf_size[bitrate] = []
+        
+        with open(VMAF + str(A_DIM - bitrate)) as f:
+            for line in f:
+                vmaf_size[bitrate].append(float(line))
 
     s_batch = [np.zeros((S_INFO, S_LEN))]
     a_batch = [action_vec]
@@ -138,19 +149,30 @@ def run_actor(sess, actor, global_assignment):
         # this is to make the framework similar to the real
         delay, sleep_time, buffer_size, rebuf, \
             video_chunk_size, next_video_chunk_sizes, \
-            end_of_video, video_chunk_remain = \
+            end_of_video, video_chunk_remain, video_chunk_vmaf = \
             net_env.get_video_chunk(bit_rate)
 
+        next_video_chunk_vmaf = []
+        for i in range(A_DIM):
+            next_video_chunk_vmaf.append(
+                vmaf_size[i][net_env.video_chunk_counter])
+                    
+        if last_chunk_vmaf is None:
+            last_chunk_vmaf = video_chunk_vmaf
+        
         time_stamp += delay  # in ms
         time_stamp += sleep_time  # in ms
 
         # reward is video quality - rebuffer penalty - smoothness
-        reward = VIDEO_BIT_RATE[bit_rate] / M_IN_K \
-            - REBUF_PENALTY * rebuf \
-            - SMOOTH_PENALTY * np.abs(VIDEO_BIT_RATE[bit_rate] -
-                                      VIDEO_BIT_RATE[last_bit_rate]) / M_IN_K
+        reward = 0.8469011 * video_chunk_vmaf - 28.79591348 * rebuf + 0.29797156 * \
+            np.abs(np.maximum(video_chunk_vmaf - last_chunk_vmaf, 0.)) - 1.06099887 * \
+            np.abs(np.minimum(video_chunk_vmaf - last_chunk_vmaf, 0.)) - \
+            2.661618558192494
 
         r_batch.append(reward)
+
+        positive_smoothness = 0.29797156 * np.abs(np.maximum(video_chunk_vmaf - last_chunk_vmaf, 0.))
+        negative_smoothness = 1.06099887 * np.abs(np.minimum(video_chunk_vmaf - last_chunk_vmaf, 0.))
 
         last_bit_rate = bit_rate
 
@@ -161,7 +183,9 @@ def run_actor(sess, actor, global_assignment):
                        str(rebuf) + '\t' +
                        str(video_chunk_size) + '\t' +
                        str(delay) + '\t' +
-                       str(reward) + '\n')
+                       str(reward) + '\t' +
+                       str(positive_smoothness) + '\t' +
+                       str(negative_smoothness) + '\n')
         log_file.flush()
 
         # retrieve previous state
@@ -174,15 +198,17 @@ def run_actor(sess, actor, global_assignment):
         state = np.roll(state, -1, axis=1)
 
         # this should be S_INFO number of terms
-        state[0, -1] = VIDEO_BIT_RATE[bit_rate] / \
-            float(np.max(VIDEO_BIT_RATE))  # last quality
+        state[0, -1] = video_chunk_vmaf / \
+            100  # last quality
         state[1, -1] = buffer_size / BUFFER_NORM_FACTOR  # 10 sec
         state[2, -1] = float(video_chunk_size) / \
             float(delay) / M_IN_K  # kilo byte / ms
         state[3, -1] = float(delay) / M_IN_K / BUFFER_NORM_FACTOR  # 10 sec
         state[4, :A_DIM] = np.array(
             next_video_chunk_sizes) / M_IN_K / M_IN_K  # mega byte
-        state[5, -1] = np.minimum(video_chunk_remain,
+        state[5, :A_DIM] = np.array(
+            next_video_chunk_vmaf) / 100.  # mega byte
+        state[6, -1] = np.minimum(video_chunk_remain,
                                   CHUNK_TIL_VIDEO_END_CAP) / float(CHUNK_TIL_VIDEO_END_CAP)
 
         action_prob = actor.predict(
@@ -201,6 +227,7 @@ def run_actor(sess, actor, global_assignment):
 
             last_bit_rate = DEFAULT_QUALITY
             bit_rate = DEFAULT_QUALITY  # use the default action here
+            last_chunk_vmaf = None
 
             del s_batch[:]
             del a_batch[:]
